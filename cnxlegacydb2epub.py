@@ -27,6 +27,7 @@ import re
 import json
 import zipfile
 
+import jinja2
 import psycopg2
 from lxml import etree
 from docopt import docopt
@@ -169,12 +170,6 @@ def extract_resources(idents, db_cursor):
     resources = db_cursor.fetchall()
 
 
-BASE_HTML = """\
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head></head>
-<body></body>
-</html>
-"""
 # HTML namespace mapping
 HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 HTML_NSMAP = {
@@ -199,42 +194,40 @@ def html_listify(tree, root_ul_element):
             html_listify(node['contents'], elm)
 
 
-def tree_to_html(tree, html):
-    """Renders the tree and sticks it in the HTML document"""
+def tree_to_html(tree):
+    """Renders the tree to HTML"""
     nav = etree.Element('nav', nsmap=HTML_NSMAP)
     ul = etree.SubElement(nav, 'ul')
     html_listify([tree], ul)
-    body = html.xpath('//html:body', namespaces=XPATH_HTML_NSMAP)[0]
-    body.append(nav)
+    return str(etree.tostring(nav), 'utf-8')
 
 
-def module_to_html(content, html):
-    """Renders the module into the html document."""
+def fix_content(content):
+    """Fixes the content by stripping the HTML wrapper."""
     # FIXME Strip existing HTML down to body. Note,
     #       it should be this way in the database.
     module_html = etree.fromstring(content['content'])
     module_body = module_html.xpath('//html:body/*',
-                                    namespaces=XPATH_HTML_NSMAP)[0]
-    body = html.xpath('//html:body', namespaces=XPATH_HTML_NSMAP)[0]
-    for elm in module_body:
-        body.append(elm)
+                                    namespaces=XPATH_HTML_NSMAP)
+    content['content'] = '\n'.join([str(etree.tostring(elm), 'utf-8')
+                                    for elm in module_body])
 
-
-def insert_metadata_in_html(content, html):
-    """Render the metadata into the html document."""
-    head = html.xpath('//html:head', namespaces=XPATH_HTML_NSMAP)[0]
-    body = html.xpath('//html:body', namespaces=XPATH_HTML_NSMAP)[0]
-    # TODO ...
 
 def render_to_html(content):
     """Render the given content to HTML."""
-    html = etree.fromstring(BASE_HTML)
+    info = content.copy()
     if content['_type'] == COLLECTION_TYPE:
-        tree_to_html(content['tree'], html)
+        info['content'] = tree_to_html(info['tree'])
     else:
-        module_to_html(content, html)
-    insert_metadata_in_html(content, html)
-    return etree.tostring(html)
+        fix_content(info)
+    html_template = jinja2.Template(HTML_TEMPLATE)
+    head_template = jinja2.Template(HTML_HEAD_TEMPLATE)
+    body_template = jinja2.Template(HTML_BODY_TEMPLATE)
+    html_blocks = {
+        'head': head_template.render(**info),
+        'body': body_template.render(**info),
+        }
+    return html_template.render(**html_blocks)
 
 
 def main(argv=None):
@@ -280,6 +273,173 @@ if __name__ == '__main__':
 
 
 # From here down be Dragons!
+
+
+HTML_TEMPLATE = """\
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:epub="http://www.idpf.org/2007/ops"
+      xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:lrmi="http://lrmi.net/the-specification"
+      version="HTML+RDFa 1.1"
+      >
+{{ head }}
+{{ body }}
+</html>
+"""
+HTML_HEAD_TEMPLATE = """\
+<head itemscope="itemscope"
+      itemtype="http://schema.org/Book"
+      >
+ <title>{{ title }}</title>
+ <meta name="dc:license" content="{{ license.name }}" />
+ <link rel="lrmi:useRightsURL" href="{{ license.url }}"/>
+ <meta itemprop="inLanguage" content="{{ language }}">
+ <meta itemprop="accessibilityFeature" content="MathML" />
+ <meta itemprop="accessibilityFeature" content="alternativeText" />
+ {% for keyword in keywords -%}
+   <meta itemprop="keywords" content="{{ keyword }}" />
+ {%- endfor %}
+ {% for subject in subjects -%}
+   <meta itemprop="about" content="{{ subject }}" />
+ {%- endfor %}
+ <meta itemprop="dateCreated" content="{{ created }}" />
+ <meta itemprop="dateModified" content="{{ revised }}" />
+</head>
+"""
+HTML_BODY_TEMPLATE = """\
+<body>
+  <div itemscope="itemscope"
+       itemtype="http://schema.org/CreativeWork"
+       data-type="metadata"
+       >
+    <h1 data-type="title" itemprop="name">{{ title }}</h1>
+    <div class="contributors">
+      <div class="authors">By: 
+      {% for person in authors -%}
+        <span itemscope="itemscope"
+              itemtype="http://schema.org/Person"
+              itemprop="author"
+              data-type="author"
+              >
+          <a href="https://accounts.cnx.org/{{ person.id }}"
+             itemprop="url"
+             data-type="cnx-id"
+             >{{ person.fullname }}</a>
+        </span>{% if not loop.last %} and {% endif %}
+      {%- endfor %}
+      </div>
+      <div class="editors">Edited by: 
+      {% for person in editors -%}
+        <span itemscope="itemscope"
+              itemtype="http://schema.org/Person"
+              itemprop="editor"
+              data-type="editor"
+              >
+          <a href="https://accounts.cnx.org/{{ person.id }}"
+             itemprop="url"
+             data-type="cnx-id"
+             >{{ person.fullname }}</a>
+        </span>{% if not loop.last %} and {% endif %}
+      {%- endfor %}
+      </div>
+      <!-- Schema.org doesn't have translator. Rather than really contorting
+           to try and use something like marc:relators, for now,
+           just use our own data-type, and use the more generic
+           "contributor" from schema.org. -->
+      <div class="editors">Edited by: 
+      {% for person in translator -%}
+        <span itemscope="itemscope"
+              itemtype="http://schema.org/Person"
+              itemprop="contributor"
+              data-type="translator"
+              >
+          <a href="https://accounts.cnx.org/{{ person.id }}"
+             itemprop="url"
+             data-type="cnx-id"
+             >{{ person.fullname }}</a>
+        </span>{% if not loop.last %} and {% endif %}
+      {%- endfor %}
+      </div>
+    </div>
+    <div class="publishers">Published by: 
+      <span itemprop="publisher"
+            data-type="publisher"
+            >
+          <a href="https://accounts.cnx.org/{{ submitter.id }}"
+             itemprop="url"
+             data-type="cnx-id"
+             >{{ submitter.fullname }}</a>
+    </div>
+
+    {% if basedOn is defined %}
+    <div class="derived-from">Based on: 
+      <a href="http://cnx.org/contents/{{ basedOn.id }}@{{ basedOn.version }}"
+         itemprop="isBasedOnURL"
+         data-type="based-on"
+         >{{ basedOn.title }}</a>
+    </div>
+    {% endif %}
+
+    <div class="permissions">
+      <div class="copyright">Copyright: 
+        {% for person in copyrightHolders -%}
+        <span itemscope="itemscope"
+              itemtype="http://schema.org/Person"
+              itemprop="contributor"
+              data-type="copyright-holder"
+              >
+          <a href="https://accounts.cnx.org/{{ person.id }}"
+             itemprop="url"
+             data-type="cnx-id"
+             >{{ person.fullname }}</a>
+        </span>{% if not loop.last %} and {% endif %}
+        {%- endfor %}
+      </div>
+
+      <div class="license">Licensed: 
+        <a rel="license"
+           href="{{ license.url }}"
+           data-type="license"
+           >{{ license.name }}</a>
+      </div>
+
+    </div>
+
+    {% if keywords is defined %}
+    <div class="keywords">Keywords:
+      {% for keyword in keywords -%}
+        <span itemprop="keywords"
+              data-type="keyword"
+              >{{ keyword }}</span>
+        {% if not loop.last %}, {% endif %}
+      {%- endfor %}
+    </div>
+    {% endif %}
+
+    {% if subjects is defined %}
+    <div class="subjects">Subjects:
+      {% for subject in subjects -%}
+        <span itemprop="about"
+              data-type="subject"
+              >{{ subject }}</span>
+        {% if not loop.last %}, {% endif %}
+      {%- endfor %}
+    </div>
+    {% endif %}
+
+   <div class="description"
+        itemprop="description"
+        data-type="description"
+        >
+     <p class="summary">Summary: {{ abstract }}</p>
+    </div>
+  </div>
+
+  {{ content }}
+</body>
+"""
+
 
 SQL_GET_MODULE = """\
 SELECT row_to_json(combined_rows) as module

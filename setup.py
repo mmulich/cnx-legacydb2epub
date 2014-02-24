@@ -5,6 +5,7 @@ from setuptools import setup
 install_requires = (
     'docopt',
     'lxml',
+    'jinja2',
     'psycopg2>=2.5',
     )
 with open('README.rst', 'r') as fb:
