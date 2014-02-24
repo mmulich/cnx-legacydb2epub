@@ -264,9 +264,16 @@ def main(argv=None):
                 arc_filepath = os.path.join('contents', filename)
                 epub.writestr(arc_filepath, render_to_html(content, db_conn))
 
-                MSG = "{} - {}"
-                print(MSG.format(arc_filepath, content['title']))
+                msg = "{} - {}".format(arc_filepath, content['title'])
+                print(msg)
 
+                # Write the resources to the EPUB.
+                for resource in extract_resources(content, cursor):
+                    hash, mediatype, file = resource
+                    arc_filepath = os.path.join('resources', hash)
+                    epub.writestr(arc_filepath, file)
+                    msg = "-- {} ({})".format(arc_filepath, mediatype)
+                    print(msg)
 
     # Render the legacy content to EPUB format.
 
@@ -867,5 +874,5 @@ SQL_GET_FILES = """\
 SELECT md5, mimetype, file
 FROM module_files NATURAL JOIN files
 WHERE module_ident = %(module_ident)s
-      AND filename != any(['collection.xml', 'index.cnxml', 'index.cnxml.html'])
+      AND filename != any(ARRAY['collection.xml', 'index.cnxml', 'index.cnxml.html'])
 """
