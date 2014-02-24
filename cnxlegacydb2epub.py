@@ -171,6 +171,7 @@ def extract_resources(idents, db_cursor):
 
 BASE_HTML = """\
 <html xmlns="http://www.w3.org/1999/xhtml">
+<head></head>
 <body></body>
 </html>
 """
@@ -180,6 +181,9 @@ HTML_NSMAP = {
     None: HTML_NAMESPACE,
     'html': HTML_NAMESPACE,
 }
+# NoneType keyed namespaces are not allowed in etree.XPath.
+XPATH_HTML_NSMAP = HTML_NSMAP.copy()
+XPATH_HTML_NSMAP.pop(None)
 
 
 def html_listify(tree, root_ul_element):
@@ -195,28 +199,42 @@ def html_listify(tree, root_ul_element):
             html_listify(node['contents'], elm)
 
 
-def tree_to_html(tree):
+def tree_to_html(tree, html):
+    """Renders the tree and sticks it in the HTML document"""
     nav = etree.Element('nav', nsmap=HTML_NSMAP)
     ul = etree.SubElement(nav, 'ul')
     html_listify([tree], ul)
-    html = etree.fromstring(BASE_HTML)
-    xpath_nsmap = HTML_NSMAP.copy()
-    xpath_nsmap.pop(None)
-    body = html.xpath('//html:body', namespaces=xpath_nsmap)[0]
+    body = html.xpath('//html:body', namespaces=XPATH_HTML_NSMAP)[0]
     body.append(nav)
-    return etree.tostring(html)
 
+
+def module_to_html(content, html):
+    """Renders the module into the html document."""
+    # FIXME Strip existing HTML down to body. Note,
+    #       it should be this way in the database.
+    module_html = etree.fromstring(content['content'])
+    module_body = module_html.xpath('//html:body/*',
+                                    namespaces=XPATH_HTML_NSMAP)[0]
+    body = html.xpath('//html:body', namespaces=XPATH_HTML_NSMAP)[0]
+    for elm in module_body:
+        body.append(elm)
+
+
+def insert_metadata_in_html(content, html):
+    """Render the metadata into the html document."""
+    head = html.xpath('//html:head', namespaces=XPATH_HTML_NSMAP)[0]
+    body = html.xpath('//html:body', namespaces=XPATH_HTML_NSMAP)[0]
+    # TODO ...
 
 def render_to_html(content):
     """Render the given content to HTML."""
+    html = etree.fromstring(BASE_HTML)
     if content['_type'] == COLLECTION_TYPE:
-        html = tree_to_html(content['tree'])
+        tree_to_html(content['tree'], html)
     else:
-        # FIXME Strip existing HTML down to body. Note,
-        #       it should be this way in the database.
-        html = content['content']
-        # TODO ...
-    return html
+        module_to_html(content, html)
+    insert_metadata_in_html(content, html)
+    return etree.tostring(html)
 
 
 def main(argv=None):
