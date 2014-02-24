@@ -9,15 +9,14 @@
 Exports Connexions documents from the legacy database to EPUB.
 
 Usage:
-  legacydb2epub <id> <version> [--db-uri=<uri>] [--file=<file>]
+  legacydb2epub [--db-uri=<uri>] [--] <ident-hash> [<file>]
 
 Options:
-  <id>            A module's content id (e.g. m44425)
-  <version>       A module's version number (e.g. 1.1)
+  <ident-hash>    A module's content id and version (e.g. <uuid>[@<version>])
+  <file>          File-path to output [default: <ident-hash>.epub]
   --db-uri=<uri>  The database connection URI
         (e.g. postgresql://[<user>[:<pass>]]@<host>[:<port>]/<db-name>)
         [default: postgresql://localhost]
-  --file=<file>   File output file-path
   -h, --help      Display this usage help.
   --version       Display version number.
 
@@ -25,6 +24,7 @@ Options:
 import sys
 import re
 import json
+import zipfile
 
 import psycopg2
 from docopt import docopt
@@ -57,7 +57,24 @@ class CoreException(Exception):
     code = -1
 
 
-class URIParsingError(Exception):
+class OptionError(CoreException):
+    code = 5
+
+    def __init__(self, option, cli_args, message=None):
+        self.option = option
+        self.cli_args = cli_args
+        self.message = message
+
+    def __str__(self):
+        return "{}={} -- {}".format(self.option, self.cli_args[self.option],
+                                     self.message or '')
+
+    def __repr__(self):
+        cls_name = self.__class__.__name__
+        return "<{} ({})>".format(cls_name, str(self))
+
+
+class URIParsingError(CoreException):
     """Raised when the database URI cannot be parsed."""
     code = 10
 
@@ -152,9 +169,14 @@ def main(argv=None):
     """Main command-line interface"""
     args = docopt(__doc__, argv, version=VERSION)
     psycopg2_db_conn_str = db_uri_to_connection_str(args['--db-uri'])
-    # - Determine the output stream (stdout or file).
 
-    id, version = args['<id>'], args['<version>']
+    # - Set up the output stream.
+
+    try:
+        id, version = args['<ident-hash>'].split('@')
+    except ValueError as exc:
+        if exc.args[0].find('unpack') >= 0:
+            raise OptionError('<ident-hash>', args, "missing version")
     # Build the legacy content as a mapping object.
     with psycopg2.connect(psycopg2_db_conn_str) as db_conn:
         with db_conn.cursor() as cursor:
