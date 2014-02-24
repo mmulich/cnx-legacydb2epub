@@ -21,12 +21,14 @@ Options:
   --version       Display version number.
 
 """
+import os
 import sys
 import re
 import json
 import zipfile
 
 import psycopg2
+from lxml import etree
 from docopt import docopt
 
 
@@ -49,6 +51,8 @@ URI_REGEX = re.compile(r'''
 )?
 (?:/(?P<database>.*))?
 ''', re.X)
+COLLECTION_TYPE = 'Collection'
+MODULE_TYPE = 'Module'
 
 
 class CoreException(Exception):
@@ -128,7 +132,7 @@ def extract_content(id, version, db_cursor):
         raise ValueError("Content not found for id={} and version={}" \
                          .format(id, version))
     # Is it a module or collection? (LEAF or TREE)
-    if module['_type'] == 'Collection':
+    if module['_type'] == COLLECTION_TYPE:
         # Grab the tree...
         db_cursor.execute(SQL_GET_TREE, module)
         module['tree'] = json.loads(db_cursor.fetchone()[0])
@@ -165,12 +169,67 @@ def extract_resources(idents, db_cursor):
     resources = db_cursor.fetchall()
 
 
+BASE_HTML = """\
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body></body>
+</html>
+"""
+# HTML namespace mapping
+HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
+HTML_NSMAP = {
+    None: HTML_NAMESPACE,
+    'html': HTML_NAMESPACE,
+}
+
+
+def html_listify(tree, root_ul_element):
+    for node in tree:
+        li_elm = etree.SubElement(root_ul_element, 'li')
+        a_elm = etree.SubElement(li_elm, 'a')
+        a_elm.text = node['title']
+        if node['id'] != 'subcol':
+            # FIXME Hard coded route...
+            a_elm.set('href', '{}.html'.format(node['id']))
+        if 'contents' in node:
+            elm = etree.SubElement(li_elm, 'ul')
+            html_listify(node['contents'], elm)
+
+
+def tree_to_html(tree):
+    nav = etree.Element('nav', nsmap=HTML_NSMAP)
+    ul = etree.SubElement(nav, 'ul')
+    html_listify([tree], ul)
+    html = etree.fromstring(BASE_HTML)
+    xpath_nsmap = HTML_NSMAP.copy()
+    xpath_nsmap.pop(None)
+    body = html.xpath('//html:body', namespaces=xpath_nsmap)[0]
+    body.append(nav)
+    return etree.tostring(html)
+
+
+def render_to_html(content):
+    """Render the given content to HTML."""
+    if content['_type'] == COLLECTION_TYPE:
+        html = tree_to_html(content['tree'])
+    else:
+        # FIXME Strip existing HTML down to body. Note,
+        #       it should be this way in the database.
+        html = content['content']
+        # TODO ...
+    return html
+
+
 def main(argv=None):
     """Main command-line interface"""
     args = docopt(__doc__, argv, version=VERSION)
     psycopg2_db_conn_str = db_uri_to_connection_str(args['--db-uri'])
 
     # - Set up the output stream.
+    if args['<file>'] is None:
+        filepath = "{}.epub".format(args['<ident-hash>'])
+    else:
+        filepath = args['<file>']
+    epub = zipfile.ZipFile(filepath, 'w')
 
     try:
         id, version = args['<ident-hash>'].split('@')
@@ -181,13 +240,19 @@ def main(argv=None):
     with psycopg2.connect(psycopg2_db_conn_str) as db_conn:
         with db_conn.cursor() as cursor:
             for content in extract_content(id, version, cursor):
-                MSG = "{}@{} - {}"
-                print(MSG.format(content['id'], content['version'], content['title']))
+                filename = "{}@{}.html".format(content['id'],
+                                               content['version'])
+                arc_filepath = os.path.join('contents', filename)
+                epub.writestr(arc_filepath, render_to_html(content))
+
+                MSG = "{} - {}"
+                print(MSG.format(arc_filepath, content['title']))
 
 
     # Render the legacy content to EPUB format.
 
 
+    epub.close()
     return 0
 
 
